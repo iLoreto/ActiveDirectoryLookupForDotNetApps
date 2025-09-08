@@ -43,10 +43,13 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="ActiveDirectoryService.cs" />
+    <Compile Include="Classes\ActiveDirectoryHelper.cs" />
+    <Compile Include="Classes\ActiveDirectoryService.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup>
     <WCFMetadata Include="Connected Services\" />
   </ItemGroup>
+  <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
