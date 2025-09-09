@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.DirectoryServices;
+using System.Linq;
 
 namespace ActiveDirectoryLookup.NetFramework
 {
@@ -35,6 +36,18 @@ namespace ActiveDirectoryLookup.NetFramework
         /// This property maps to the 'sAMAccountName' attribute in Active Directory.
         /// </summary>
         public string SamAccountName { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the user is a supervisor.
+        /// This is determined by checking membership in supervisor-related Active Directory groups.
+        /// </summary>
+        public bool IsSupervisor { get; set; } = false;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the user is a manager.
+        /// This is determined by checking membership in manager-related Active Directory groups.
+        /// </summary>
+        public bool IsManager { get; set; } = false;
     }
 
     /// <summary>
@@ -64,6 +77,71 @@ namespace ActiveDirectoryLookup.NetFramework
         /// Gets or sets the total number of users found during the search operation.
         /// </summary>
         public int TotalFound { get; set; }
+    }
+
+    /// <summary>
+    /// Represents the result of a supervisor or manager membership check operation.
+    /// </summary>
+    [Serializable]
+    public class RoleCheckResult
+    {
+        /// <summary>
+        /// Gets or sets a value indicating whether the operation was successful.
+        /// </summary>
+        public bool Success { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the user is a supervisor.
+        /// </summary>
+        public bool IsSupervisor { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the user is a manager.
+        /// </summary>
+        public bool IsManager { get; set; }
+
+        /// <summary>
+        /// Gets or sets the error message if the operation failed, or details about role groups if succeeded.
+        /// </summary>
+        public string ErrorMessage { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the list of supervisor groups the user belongs to.
+        /// </summary>
+        public List<string> SupervisorGroups { get; set; } = new List<string>();
+
+        /// <summary>
+        /// Gets or sets the list of manager groups the user belongs to.
+        /// </summary>
+        public List<string> ManagerGroups { get; set; } = new List<string>();
+    }
+
+    /// <summary>
+    /// Represents the result of a supervisor membership check operation.
+    /// This class is kept for backward compatibility.
+    /// </summary>
+    [Serializable]
+    public class SupervisorCheckResult
+    {
+        /// <summary>
+        /// Gets or sets a value indicating whether the operation was successful.
+        /// </summary>
+        public bool Success { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the user is a supervisor.
+        /// </summary>
+        public bool IsSupervisor { get; set; }
+
+        /// <summary>
+        /// Gets or sets the error message if the operation failed, or details about supervisor groups if succeeded.
+        /// </summary>
+        public string ErrorMessage { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the list of supervisor groups the user belongs to.
+        /// </summary>
+        public List<string> SupervisorGroups { get; set; } = new List<string>();
     }
 
     /// <summary>
@@ -110,10 +188,12 @@ namespace ActiveDirectoryLookup.NetFramework
         /// <summary>
         /// Searches for Active Directory users by name using wildcard matching.
         /// Searches across displayName, common name (cn), and SAM account name fields.
+        /// Supports both "First Last" and "Last, First" name formats.
         /// </summary>
         /// <param name="searchName">
         /// The name or partial name to search for. Wildcard characters are automatically added.
         /// Case-insensitive search across multiple name fields.
+        /// Supports multiple name formats (e.g., "John Smith" will find both "John Smith" and "Smith, John").
         /// </param>
         /// <returns>
         /// A <see cref="SearchResult"/> containing:
@@ -126,11 +206,12 @@ namespace ActiveDirectoryLookup.NetFramework
         /// This method uses the current user's Windows credentials for Active Directory authentication.
         /// Requires appropriate read permissions on the Active Directory domain.
         /// Search is performed against the default domain context.
+        /// Enhanced to handle multiple name formats for better search results.
         /// </remarks>
         /// <example>
         /// <code>
         /// var service = new ActiveDirectoryService();
-        /// var result = service.SearchUsersByName("Smith");
+        /// var result = service.SearchUsersByName("John Smith"); // Will find "John Smith" or "Smith, John"
         /// 
         /// if (result.Success)
         /// {
@@ -154,8 +235,9 @@ namespace ActiveDirectoryLookup.NetFramework
                     // Create a DirectorySearcher to search for users
                     using (var searcher = new DirectorySearcher(domain))
                     {
-                        // Set the filter to search for users with the specified name
-                        searcher.Filter = $"(&(objectClass=user)(objectCategory=person)(|(displayName=*{searchName}*)(cn=*{searchName}*)(sAMAccountName=*{searchName}*)))";
+                        // Build enhanced filter that handles multiple name formats
+                        var filter = BuildNameSearchFilter(searchName);
+                        searcher.Filter = filter;
 
                         // Specify which properties to retrieve
                         searcher.PropertiesToLoad.Add("displayName");
@@ -219,6 +301,75 @@ namespace ActiveDirectoryLookup.NetFramework
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Builds an enhanced LDAP filter that handles multiple name formats.
+        /// Supports both "First Last" and "Last, First" search patterns.
+        /// </summary>
+        /// <param name="searchName">The name to search for.</param>
+        /// <returns>An LDAP filter string that searches multiple name formats.</returns>
+        private string BuildNameSearchFilter(string searchName)
+        {
+            if (string.IsNullOrWhiteSpace(searchName))
+            {
+                return "(&(objectClass=user)(objectCategory=person))";
+            }
+
+            var searchTerms = new List<string>();
+            
+            // Add the original search term
+            searchTerms.Add($"*{searchName.Trim()}*");
+
+            // Check if the search contains multiple words (likely first and last name)
+            var words = searchName.Trim().Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            
+            if (words.Length == 2)
+            {
+                var firstWord = words[0];
+                var secondWord = words[1];
+                
+                // Add "Last, First" format
+                searchTerms.Add($"*{secondWord}, {firstWord}*");
+                
+                // Add "First*Last" format (handles middle names/initials)
+                searchTerms.Add($"*{firstWord}*{secondWord}*");
+                
+                // Add "Last*First" format (handles middle names/initials in reverse)
+                searchTerms.Add($"*{secondWord}*{firstWord}*");
+            }
+            else if (words.Length > 2)
+            {
+                // For more than 2 words, try first and last word combinations
+                var firstWord = words[0];
+                var lastWord = words[words.Length - 1];
+                
+                // Add "Last, First" format
+                searchTerms.Add($"*{lastWord}, {firstWord}*");
+                
+                // Add partial matches for each word
+                foreach (var word in words)
+                {
+                    if (word.Length > 2) // Only add words longer than 2 characters
+                    {
+                        searchTerms.Add($"*{word}*");
+                    }
+                }
+            }
+
+            // Build the OR conditions for displayName
+            var displayNameConditions = string.Join("", searchTerms.Select(term => $"(displayName={term})"));
+            
+            // Build the OR conditions for cn (common name)
+            var cnConditions = string.Join("", searchTerms.Select(term => $"(cn={term})"));
+            
+            // Build the OR conditions for sAMAccountName
+            var samConditions = string.Join("", searchTerms.Select(term => $"(sAMAccountName={term})"));
+
+            // Combine all conditions
+            var filter = $"(&(objectClass=user)(objectCategory=person)(|{displayNameConditions}{cnConditions}{samConditions}))";
+            
+            return filter;
         }
 
         /// <summary>
@@ -399,6 +550,196 @@ namespace ActiveDirectoryLookup.NetFramework
         }
 
         /// <summary>
+        /// Checks if a user is a supervisor or manager by examining their Active Directory group memberships.
+        /// Searches for groups that contain supervisor, manager, or leadership-related keywords in their names.
+        /// </summary>
+        /// <param name="samAccountName">
+        /// The SAM account name of the user to check for supervisor/manager privileges.
+        /// </param>
+        /// <returns>
+        /// A <see cref="RoleCheckResult"/> containing:
+        /// - Success status indicating if the operation completed without errors
+        /// - IsSupervisor boolean indicating if the user has supervisor privileges
+        /// - IsManager boolean indicating if the user has manager privileges
+        /// - List of supervisor and manager groups the user belongs to
+        /// - Error message if the operation failed, or group details if succeeded
+        /// </returns>
+        /// <remarks>
+        /// This method searches for group memberships that typically indicate supervisory or managerial roles.
+        /// The search is case-insensitive and looks for common role-related keywords in group names.
+        /// Uses the current user's Windows credentials for Active Directory authentication.
+        /// </remarks>
+        /// <example>
+        /// <code>
+        /// var service = new ActiveDirectoryService();
+        /// var result = service.CheckUserRoles("jsmith");
+        /// 
+        /// if (result.Success)
+        /// {
+        ///     if (result.IsSupervisor)
+        ///     {
+        ///         Console.WriteLine("User is a supervisor");
+        ///         Console.WriteLine($"Supervisor groups: {string.Join(", ", result.SupervisorGroups)}");
+        ///     }
+        ///     if (result.IsManager)
+        ///     {
+        ///         Console.WriteLine("User is a manager");
+        ///         Console.WriteLine($"Manager groups: {string.Join(", ", result.ManagerGroups)}");
+        ///     }
+        /// }
+        /// else
+        /// {
+        ///     Console.WriteLine($"Check failed: {result.ErrorMessage}");
+        /// }
+        /// </code>
+        /// </example>
+        public RoleCheckResult CheckUserRoles(string samAccountName)
+        {
+            var result = new RoleCheckResult();
+
+            try
+            {
+                // Create a DirectoryEntry object for the current domain
+                using (var domain = new DirectoryEntry())
+                {
+                    // Create a DirectorySearcher to find the user
+                    using (var searcher = new DirectorySearcher(domain))
+                    {
+                        // Set the filter to search for the specific user
+                        searcher.Filter = $"(&(objectClass=user)(objectCategory=person)(sAMAccountName={samAccountName}))";
+                        
+                        // Specify which properties to retrieve
+                        searcher.PropertiesToLoad.Add("memberOf");
+                        searcher.PropertiesToLoad.Add("displayName");
+                        
+                        // Set search scope and size limit
+                        searcher.SearchScope = SearchScope.Subtree;
+                        searcher.SizeLimit = 1;
+
+                        // Execute the search
+                        using (var results = searcher.FindAll())
+                        {
+                            if (results.Count == 0)
+                            {
+                                result.Success = true;
+                                result.IsSupervisor = false;
+                                result.IsManager = false;
+                                result.ErrorMessage = $"User '{samAccountName}' not found in Active Directory.";
+                                return result;
+                            }
+
+                            var userResult = results[0];
+                            var displayName = userResult.Properties["displayName"].Count > 0 
+                                ? userResult.Properties["displayName"][0]?.ToString() ?? samAccountName
+                                : samAccountName;
+
+                            // Define keywords that typically indicate supervisor roles
+                            var supervisorKeywords = new[] 
+                            { 
+                                "supervisor", "lead", "team lead", "senior", "coordinator"
+                            };
+
+                            // Define keywords that typically indicate manager roles
+                            var managerKeywords = new[] 
+                            { 
+                                "manager", "admin", "director", "chief", "head"
+                            };
+
+                            var supervisorGroups = new List<string>();
+                            var managerGroups = new List<string>();
+
+                            // Check group memberships
+                            if (userResult.Properties["memberOf"].Count > 0)
+                            {
+                                foreach (string groupDN in userResult.Properties["memberOf"])
+                                {
+                                    // Extract group name from DN (Distinguished Name)
+                                    var groupName = ExtractGroupNameFromDN(groupDN);
+                                    
+                                    // Check if group name contains supervisor keywords
+                                    foreach (var keyword in supervisorKeywords)
+                                    {
+                                        if (groupName.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
+                                        {
+                                            supervisorGroups.Add(groupName);
+                                            break; // Avoid adding the same group multiple times
+                                        }
+                                    }
+
+                                    // Check if group name contains manager keywords
+                                    foreach (var keyword in managerKeywords)
+                                    {
+                                        if (groupName.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
+                                        {
+                                            managerGroups.Add(groupName);
+                                            break; // Avoid adding the same group multiple vezes
+                                        }
+                                    }
+                                }
+                            }
+
+                            result.Success = true;
+                            result.IsSupervisor = supervisorGroups.Count > 0;
+                            result.IsManager = managerGroups.Count > 0;
+                            result.SupervisorGroups = supervisorGroups;
+                            result.ManagerGroups = managerGroups;
+
+                            var roleInfo = new List<string>();
+                            if (result.IsSupervisor)
+                                roleInfo.Add($"Supervisor groups: {string.Join(", ", supervisorGroups)}");
+                            if (result.IsManager)
+                                roleInfo.Add($"Manager groups: {string.Join(", ", managerGroups)}");
+
+                            if (result.IsSupervisor || result.IsManager)
+                            {
+                                result.ErrorMessage = $"User '{displayName}' has leadership roles.\n" + string.Join("\n", roleInfo);
+                            }
+                            else
+                            {
+                                result.ErrorMessage = $"User '{displayName}' has no supervisor or manager roles.\n" +
+                                                     "No leadership-related group memberships found.";
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                result.Success = false;
+                result.IsSupervisor = false;
+                result.IsManager = false;
+                result.ErrorMessage = $"Error checking user roles: {ex.Message}";
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Extracts the group name from a Distinguished Name (DN) string.
+        /// </summary>
+        /// <param name="groupDN">The Distinguished Name of the group.</param>
+        /// <returns>The extracted group name.</returns>
+        private string ExtractGroupNameFromDN(string groupDN)
+        {
+            if (string.IsNullOrEmpty(groupDN))
+                return string.Empty;
+
+            // Group DN format: CN=GroupName,OU=...,DC=...,DC=...
+            // Extract the CN part
+            var cnStart = groupDN.IndexOf("CN=", StringComparison.OrdinalIgnoreCase);
+            if (cnStart == -1)
+                return groupDN;
+
+            cnStart += 3; // Skip "CN="
+            var cnEnd = groupDN.IndexOf(',', cnStart);
+            
+            if (cnEnd == -1)
+                return groupDN.Substring(cnStart);
+            
+            return groupDN.Substring(cnStart, cnEnd - cnStart);
+        }
+
+        /// <summary>
         /// Performs a comprehensive test of Active Directory connectivity and search functionality.
         /// This method not only tests the connection but also verifies that user search operations work
         /// by attempting to find the current user's profile in Active Directory.
@@ -461,6 +802,15 @@ namespace ActiveDirectoryLookup.NetFramework
                     if (userSearchResult.Success && userSearchResult.Users.Count > 0)
                     {
                         var currentUser = userSearchResult.Users[0];
+                        
+                        // Check roles for the current user
+                        var roleResult = CheckUserRoles(currentUserSam);
+                        if (roleResult.Success)
+                        {
+                            currentUser.IsSupervisor = roleResult.IsSupervisor;
+                            currentUser.IsManager = roleResult.IsManager;
+                        }
+                        
                         result.Success = true;
                         result.Users = userSearchResult.Users; // Include the found user in the result
                         result.TotalFound = userSearchResult.TotalFound;
@@ -469,7 +819,9 @@ namespace ActiveDirectoryLookup.NetFramework
                                              $"Name: {currentUser.Name}\n" +
                                              $"SAM Account: {currentUser.SamAccountName}\n" +
                                              $"Email: {currentUser.Email}\n" +
-                                             $"Employee ID: {currentUser.EmployeeID}\n\n" +
+                                             $"Employee ID: {currentUser.EmployeeID}\n" +
+                                             $"Is Supervisor: {(currentUser.IsSupervisor ? "Yes" : "No")}\n" +
+                                             $"Is Manager: {(currentUser.IsManager ? "Yes" : "No")}\n\n" +
                                              $"User search permissions verified successfully.";
                     }
                     else
